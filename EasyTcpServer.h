@@ -12,6 +12,8 @@
 	#include<unistd.h> //uni std
 	#include<arpa/inet.h>
 	#include<string.h>
+	#include <sys/epoll.h>			/* epoll头文件 */
+	#include <fcntl.h>	                /* nonblocking需要 */
 
 	#define SOCKET int
 	#define INVALID_SOCKET  (SOCKET)(~0)
@@ -22,6 +24,7 @@
 #include<vector>
 #include"MessageHeader.h"
 
+#define MAXEPOLL 100000
 
 class EasyTcpServer
 {
@@ -34,6 +37,10 @@ private:
 	//缓冲区
 	char szRecv[409600] = {};
 
+	int epoll_fd = 0;
+	struct 	epoll_event	ev;
+	struct 	epoll_event	evs[MAXEPOLL];
+
 public:
 	EasyTcpServer()
 	{
@@ -44,6 +51,18 @@ public:
 		Close();
 	}
 
+ 
+//!> 设置非阻塞
+//!> 
+int setnonblocking( int fd )
+{
+	if( fcntl( fd, F_SETFL, fcntl( fd, F_GETFD, 0 )|O_NONBLOCK ) == -1 )
+	{
+		printf("Set blocking error ");
+		return -1;
+	}
+	return 0;
+}
 	//初始化Socket
 	SOCKET InitSocket()
 	{
@@ -59,6 +78,10 @@ public:
 			Close();
 		}
 		_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+				//设置非阻塞
+		setnonblocking(_sock);
+
 		if (INVALID_SOCKET == _sock)
 		{
 			printf("错误，建立socket失败...\n");
@@ -66,6 +89,7 @@ public:
 		else {
 			printf("建立socket=<%d>成功...\n", (int)_sock);
 		}
+
 		return _sock;
 	}
 
@@ -155,74 +179,7 @@ public:
 		return _sock != INVALID_SOCKET;
 	}
 
-	//启动进程 判断
-	bool OnRun()
-	{
-		if (isRun())
-		{
-			//伯克利套接字 BSD socket
-			fd_set fdRead;//描述符（socket） 集合
-			fd_set fdWrite;
-			fd_set fdExp;
-			//清理集合
-			FD_ZERO(&fdRead);
-			FD_ZERO(&fdWrite);
-			FD_ZERO(&fdExp);
-			//将描述符（socket）加入集合
-			FD_SET(_sock, &fdRead);
-			FD_SET(_sock, &fdWrite);
-			FD_SET(_sock, &fdExp);
-			SOCKET maxSock = _sock;
-			for (int n = (int)g_clients.size() - 1; n >= 0; n--)
-			{
-				FD_SET(g_clients[n], &fdRead);
-				if (maxSock < g_clients[n])
-				{
-					maxSock = g_clients[n];
-				}
-			}
-			///nfds 是一个整数值 是指fd_set集合中所有描述符(socket)的范围，而不是数量
-			///既是所有文件描述符最大值+1 在Windows中这个参数可以写0
-			//timeval t = { 1,0 };
-			int ret = select(maxSock + 1, &fdRead, &fdWrite, &fdExp, nullptr); //&t
-			//printf("select ret=%d count=%d\n", ret, _nCount++);
-			if (ret < 0)
-			{
-				printf("select任务结束。\n");
-				Close();
-				return false;
-			}
-			//判断描述符（socket）是否在集合中
-			if (FD_ISSET(_sock, &fdRead))
-			{
-				FD_CLR(_sock, &fdRead);
-				Accept();//接受链接 将新加入的加入到socket队列中去
-			}
-			for (int n = (int)g_clients.size() - 1; n >= 0; n--)
-			{
-				if (FD_ISSET(g_clients[n], &fdRead))
-				{
-					if (-1 == RecvData(g_clients[n]))//将受到的数据返回出去
-					{
-						//删除对应的socket链接
-						auto iter = g_clients.begin() + n;//std::vector<SOCKET>::iterator
-						if (iter != g_clients.end())
-						{
-							#ifdef WIN32
-							closesocket(*iter);//关闭对应的处理socket
-							#endif
-							close(*iter);
-							g_clients.erase(iter);
-						}
-					}
-				}
-			}
-			return true;
-		}
-		return false;
-
-	}
-	//接收数据 将收到的数据返回回去 处理粘包 拆分包
+//接收数据 将收到的数据返回回去 处理粘包 拆分包
 	int RecvData(SOCKET _cSock)
 	{
 		// 5 接收客户端数据
@@ -242,6 +199,75 @@ public:
 		*/
 		return 0;
 	}
+
+	//启动进程 判断
+	bool OnRun()
+	{
+
+		if (isRun())
+		{
+				//!> 创建epoll
+		//!> 
+		epoll_fd = epoll_create( MAXEPOLL );	//!> create
+		ev.events = EPOLLIN|EPOLLET;		//!> accept Read!
+		ev.data.fd = _sock;					//!> 将listen_fd 加入
+
+		if( epoll_ctl( epoll_fd, EPOLL_CTL_ADD, _sock, &ev ) < 0 )
+		{
+			printf("Epoll Error n");
+		}
+
+		int	cur_fds = 1; //最大监听事件数量
+		int wait_fds = 0;//等待处理的fd
+		if( ( wait_fds = epoll_wait( epoll_fd, evs, cur_fds, -1 ) ) == -1 )
+		{
+			printf( "Epoll Wait Error ");
+		}
+ 
+
+		for(int i = 0; i < wait_fds; i++ )
+		{
+			if( evs[i].data.fd == _sock && cur_fds < MAXEPOLL )	
+			//!> if是监听端口有事
+			{	
+				int _cSock = Accept();//接受链接 将新加入的加入到socket队列中去
+				printf( "Server get from client !\n"/*,  inet_ntoa(cliaddr.sin_addr), cliaddr.sin_port */);
+				
+				ev.events = EPOLLIN|EPOLLET;		//!> ET模式
+				ev.data.fd = _cSock;					//!> 将sock 加入
+				int res = epoll_ctl( epoll_fd, EPOLL_CTL_ADD, _cSock, &ev );
+				if(  res < 0 )
+				{
+					printf("Epoll Error 接受错误\n");
+				}
+				++cur_fds; 
+				continue;		
+			}
+			
+			//!> 下面处理数据
+			//!> 
+			if (-1 == RecvData(g_clients[i]))//将受到的数据返回出去
+					{
+						//删除对应的socket链接
+						auto iter = g_clients.begin() + i;//std::vector<SOCKET>::iterator
+						if (iter != g_clients.end())
+						{
+							#ifdef WIN32
+							closesocket(*iter);//关闭对应的处理socket
+							#endif
+							close(*iter);
+							g_clients.erase(iter);
+							epoll_ctl( epoll_fd, EPOLL_CTL_DEL, evs[i].data.fd, &ev );	//!> 删除计入的fd
+							--cur_fds;					//!> 减少一个呗！
+						}
+					}
+			
+				}
+		}
+		return false;
+
+	}
+	
 	//响应网络消息
 	virtual void OnNetMsg(SOCKET _cSock, DataHeader* header)
 	{

@@ -209,8 +209,15 @@ int setnonblocking( int fd )
 				//!> 创建epoll
 		//!> 
 		epoll_fd = epoll_create( MAXEPOLL );	//!> create
-		ev.events = EPOLLIN|EPOLLET;		//!> accept Read!
-		ev.data.fd = _sock;					//!> 将listen_fd 加入
+		/*
+		epoll两种模式 LT ET 其中LT可以不立即处理事件 如果这次不处理那么下次还会提交 
+		    		LT模式:ev.events = EPOLLIN; 为默认模式
+					ET模式 必须立即处理事件 这次不处理下次就不会再处理
+					ev.events = EPOLLIN|EPOLLET;
+					EPOLLIN 代表EPOLL事件响应
+		*/
+		ev.events = EPOLLIN|EPOLLET;		//!> 设置为ET模式 即事件产生之后需要立即处理 epoll不能再次通报事件
+		ev.data.fd = _sock;					//!> 监听 fd为 连接的sock
 
 		if( epoll_ctl( epoll_fd, EPOLL_CTL_ADD, _sock, &ev ) < 0 )
 		{
